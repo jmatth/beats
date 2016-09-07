@@ -1,9 +1,9 @@
 package s3out
 
 import (
-	"fmt"
 	"os"
-	"path"
+	"sync"
+	"time"
 
 	"github.com/elastic/beats/libbeat/common"
 	"github.com/elastic/beats/libbeat/common/op"
@@ -15,15 +15,19 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 )
 
+var debug = logp.MakeDebug("s3")
+
 func init() {
 	outputs.RegisterOutputPlugin("s3", New)
 }
 
 type s3Output struct {
-	config   config
-	beatName string
-	s3Svc    *s3.S3
-	fileMap  map[string]*os.File
+	config      config
+	beatName    string
+	s3Svc       *s3.S3
+	ticker      *time.Ticker
+	consumerMap map[string]*consumer
+	consumerWg  *sync.WaitGroup
 }
 
 // New instantiates a new s3 output instance.
@@ -34,6 +38,12 @@ func New(beatName string, cfg *common.Config, _ int) (outputs.Outputer, error) {
 		return nil, err
 	}
 
+	if config.AccessKeyId != "" && config.SecretAccessKey != "" {
+		debug("Found aws credentials in config, setting environment variables")
+		os.Setenv("AWS_ACCESS_KEY_ID", config.AccessKeyId)
+		os.Setenv("AWS_SECRET_ACCESS_KEY", config.SecretAccessKey)
+	}
+
 	// disable bulk support in publisher pipeline
 	cfg.SetInt("flush_interval", -1, -1)
 	cfg.SetInt("bulk_max_size", -1, -1)
@@ -41,9 +51,10 @@ func New(beatName string, cfg *common.Config, _ int) (outputs.Outputer, error) {
 	svc := s3.New(session.New(&aws.Config{Region: aws.String(config.Region)}))
 
 	output := &s3Output{
-		beatName: beatName,
-		s3Svc:    svc,
-		fileMap:  make(map[string]*os.File),
+		beatName:    beatName,
+		s3Svc:       svc,
+		consumerMap: make(map[string]*consumer),
+		consumerWg:  &sync.WaitGroup{},
 	}
 
 	if err := output.init(config); err != nil {
@@ -63,13 +74,33 @@ func (out *s3Output) init(config config) error {
 		return err
 	}
 	logp.Info("Created directory for temporary s3 files: %v", tempDir)
+	out.startTicker()
 
 	return nil
 }
 
 // Implement Outputer
 func (out *s3Output) Close() error {
+	debug("Close called on s3 outputter, shutting down")
+	out.ticker.Stop()
+	for _, consumer := range out.consumerMap {
+		close(consumer.lineChan)
+	}
+	out.consumerWg.Wait()
 	return nil
+}
+
+func (out *s3Output) startTicker() {
+	debug("Starting s3 ticker")
+	out.ticker = time.NewTicker(time.Second * time.Duration(out.config.SecondsPerChunk))
+	go func() {
+		for tick := range out.ticker.C {
+			debug("Recieved tick in s3 output, signalling consumers")
+			for _, consumer := range out.consumerMap {
+				consumer.tickChan <- tick
+			}
+		}
+	}()
 }
 
 func (out *s3Output) PublishEvent(
@@ -86,18 +117,6 @@ func (out *s3Output) PublishEvent(
 		return err
 	}
 	appType := appTypeInterface.(string)
-	file := out.fileMap[appType]
-
-	if file == nil {
-		filePath := path.Join(out.config.TemporaryDirectory, appType)
-		file, err = os.Create(filePath)
-		if err != nil {
-			logp.Err("Failed to create temporary file: %v", filePath)
-			return err
-		}
-		out.fileMap[appType] = file
-		logp.Info("Created new temporary file: %v", filePath)
-	}
 
 	messageInterface, err := data.Event.GetValue("message")
 	if err != nil {
@@ -105,10 +124,24 @@ func (out *s3Output) PublishEvent(
 		return err
 	}
 	message := messageInterface.(string)
-	_, err = fmt.Fprintln(file, message)
-	if err != nil {
-		logp.Err("Could not unwrap message for s3 output.")
+
+	consumer := out.consumerMap[appType]
+	if consumer == nil {
+		consumer, err = newConsumer(out.config.TemporaryDirectory, appType, out.s3Svc, out.config.Bucket, out.config.Prefix)
+		if err != nil {
+			logp.Err("Error creating consumer for appType %v: %v", appType, err)
+			return
+		}
+
+		out.consumerMap[appType] = consumer
+		out.consumerWg.Add(1)
+		go func() {
+			defer out.consumerWg.Done()
+			consumer.run()
+		}()
 	}
+
+	consumer.lineChan <- message
 
 	return err
 }

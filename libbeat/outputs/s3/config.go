@@ -1,34 +1,35 @@
 package s3out
 
 import (
-	"os"
-	"path"
+	"fmt"
 )
 
 type config struct {
-	AccessKeyId        string `config:access_key_id`
-	SecretAccessKey    string `config:secret_access_key`
-	AwsCredentialsFile string `config:aws_credentials_file`
-	Region             string `config:region`
-	Bucket             string `config:bucket`
-	TemporaryDirectory string `config:temporary_directory`
-
-	// RotateEveryKb int    `config:"rotate_every_kb" validate:"min=1"`
+	AccessKeyId        string `config:"access_key_id"`
+	SecretAccessKey    string `config:"secret_access_key"`
+	Region             string `config:"region"`
+	Bucket             string `config:"bucket"`
+	Prefix             string `config:"prefix"`
+	TemporaryDirectory string `config:"temporary_directory"`
+	SecondsPerChunk    int    `config:"seconds_per_chunk"`
 }
 
 var (
 	defaultConfig = config{
-		AwsCredentialsFile: path.Join(os.Getenv("HOME"), "aws", "credentials"),
 		Region:             "us-east-1",
 		TemporaryDirectory: "/tmp/beat_s3/",
+		SecondsPerChunk:    300,
 	}
 )
 
 func (c *config) Validate() error {
-	// if c.NumberOfFiles < 2 || c.NumberOfFiles > logp.RotatorMaxFiles {
-	// 	return fmt.Errorf("The number_of_files to keep should be between 2 and %v",
-	// 		logp.RotatorMaxFiles)
-	// }
+	if c.Bucket == "" {
+		return fmt.Errorf("Must specify an s3 bucket")
+	}
+
+	if c.SecondsPerChunk < 1 {
+		return fmt.Errorf("seconds_per_chunk must be a positive integer")
+	}
 
 	return nil
 }
