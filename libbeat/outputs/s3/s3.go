@@ -104,6 +104,9 @@ func (out *s3Output) PublishEvent(
 	}
 
 	consumer, err := out.getConsumer(appType)
+	if err != nil {
+		return err
+	}
 
 	consumer.AppendLine(message)
 
@@ -159,9 +162,11 @@ func getMessage(data outputs.Data) (string, error) {
 }
 
 func (out *s3Output) getConsumer(appType string) (ConsumerAPI, error) {
+	var err error
+
 	consumer := out.consumerMap[appType]
 	if consumer == nil {
-		consumer, err := newConsumer(out.config.TemporaryDirectory, appType, out.s3Svc, out.config.Bucket, out.config.Prefix)
+		consumer, err = newConsumer(out.config.TemporaryDirectory, appType, out.s3Svc, out.config.Bucket, out.config.Prefix)
 		if err != nil {
 			logp.Err("Error creating consumer for appType %v: %v", appType, err)
 			return nil, err

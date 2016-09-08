@@ -3,43 +3,16 @@
 package s3out
 
 import (
-	"io/ioutil"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
-type S3Mock struct {
-	mock.Mock
-}
-
-func (s *S3Mock) PutObject(obj *s3.PutObjectInput) (*s3.PutObjectOutput, error) {
-	s.Called(obj)
-	return new(s3.PutObjectOutput), nil
-}
-
-func mkTempDir(t *testing.T) string {
-	tempDir, err := ioutil.TempDir("", "testConsumer")
-	assert.Nil(t, err)
-	err = os.MkdirAll(tempDir, 0700)
-	assert.Nil(t, err)
-	t.Logf("Created temporary directory %v", tempDir)
-	return tempDir
-}
-
-func rmTempDir(t *testing.T, tempDir string) {
-	t.Logf("Removing temporary directory %v", tempDir)
-	err := os.RemoveAll(tempDir)
-	assert.Nil(t, err)
-}
-
 func TestShutdown(t *testing.T) {
 	tempDir := mkTempDir(t)
-	defer func() { rmTempDir(t, tempDir) }()
+	defer rmTempDir(t, tempDir)
 
 	consumer, err := newConsumer(tempDir, "testLog", nil, "testBucket", "")
 	assert.Nil(t, err)
@@ -70,9 +43,9 @@ func TestShutdown(t *testing.T) {
 // Make sure we don't upload empty chunks to S3
 func TestEmptyChunk(t *testing.T) {
 	tempDir := mkTempDir(t)
-	defer func() { rmTempDir(t, tempDir) }()
+	defer rmTempDir(t, tempDir)
 
-	s3 := new(S3Mock)
+	s3 := new(s3Mock)
 	s3.On("PutObject", mock.AnythingOfType("*s3.PutObjectInput")).Return(nil)
 
 	consumer, err := newConsumer(tempDir, "testLog", s3, "testBucket", "")
@@ -101,9 +74,9 @@ func TestEmptyChunk(t *testing.T) {
 
 func TestUploadChunk(t *testing.T) {
 	tempDir := mkTempDir(t)
-	defer func() { rmTempDir(t, tempDir) }()
+	defer rmTempDir(t, tempDir)
 
-	s3 := new(S3Mock)
+	s3 := new(s3Mock)
 	s3.On("PutObject", mock.AnythingOfType("*s3.PutObjectInput")).Return(nil)
 
 	consumer, err := newConsumer(tempDir, "testLog", s3, "testBucket", "")
