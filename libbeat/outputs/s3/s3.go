@@ -2,6 +2,7 @@ package s3out
 
 import (
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -84,7 +85,31 @@ func (out *s3Output) init(config config) error {
 	return nil
 }
 
-// Implement Outputer
+func (out *s3Output) PublishEvent(
+	sig op.Signaler,
+	opts outputs.Options,
+	data outputs.Data,
+) (err error) {
+
+	defer func() { op.Sig(sig, err) }()
+
+	appType, err := getAppType(data)
+	if err != nil {
+		return err
+	}
+
+	message, err := getMessage(data)
+	if err != nil {
+		return err
+	}
+
+	consumer, err := out.getConsumer(appType)
+
+	consumer.AppendLine(message)
+
+	return err
+}
+
 func (out *s3Output) Close() error {
 	debug("Close called on s3 outputter, shutting down")
 	out.ticker.Stop()
@@ -108,34 +133,38 @@ func (out *s3Output) startTicker() {
 	}()
 }
 
-func (out *s3Output) PublishEvent(
-	sig op.Signaler,
-	opts outputs.Options,
-	data outputs.Data,
-) (err error) {
-
-	defer func() { op.Sig(sig, err) }()
-
+func getAppType(data outputs.Data) (string, error) {
 	appTypeInterface, err := data.Event.GetValue("fields.appType")
 	if err != nil {
-		logp.Err("Could not retrieve fields.appType for s3 output. Missing configuration?")
-		return err
+		logp.Info("Could not retrieve fields.appType for s3 output. Falling back to basename of source file")
+		sourceInterface, err := data.Event.GetValue("source")
+		if err != nil {
+			logp.Err("Could not get the source of event for s3 output and appType not set, bailing out")
+			return "", err
+		}
+		source := sourceInterface.(string)
+		return filepath.Base(source), nil
+	} else {
+		return appTypeInterface.(string), nil
 	}
-	appType := appTypeInterface.(string)
+}
 
+func getMessage(data outputs.Data) (string, error) {
 	messageInterface, err := data.Event.GetValue("message")
 	if err != nil {
 		logp.Err("Could not get message for s3 output. Malformed event?")
-		return err
+		return "", err
 	}
-	message := messageInterface.(string)
+	return messageInterface.(string), nil
+}
 
+func (out *s3Output) getConsumer(appType string) (ConsumerAPI, error) {
 	consumer := out.consumerMap[appType]
 	if consumer == nil {
-		consumer, err = newConsumer(out.config.TemporaryDirectory, appType, out.s3Svc, out.config.Bucket, out.config.Prefix)
+		consumer, err := newConsumer(out.config.TemporaryDirectory, appType, out.s3Svc, out.config.Bucket, out.config.Prefix)
 		if err != nil {
 			logp.Err("Error creating consumer for appType %v: %v", appType, err)
-			return
+			return nil, err
 		}
 
 		out.consumerMap[appType] = consumer
@@ -145,8 +174,5 @@ func (out *s3Output) PublishEvent(
 			consumer.Run()
 		}()
 	}
-
-	consumer.AppendLine(message)
-
-	return err
+	return consumer, nil
 }
