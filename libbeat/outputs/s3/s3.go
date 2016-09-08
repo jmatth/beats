@@ -21,12 +21,17 @@ func init() {
 	outputs.RegisterOutputPlugin("s3", New)
 }
 
+// A subset of github.com/aws/aws-sdk-go/blob/master/service/s3/s3iface.S3API
+type S3API interface {
+	PutObject(*s3.PutObjectInput) (*s3.PutObjectOutput, error)
+}
+
 type s3Output struct {
 	config      config
 	beatName    string
-	s3Svc       *s3.S3
+	s3Svc       S3API
 	ticker      *time.Ticker
-	consumerMap map[string]*consumer
+	consumerMap map[string]ConsumerAPI
 	consumerWg  *sync.WaitGroup
 }
 
@@ -53,7 +58,7 @@ func New(beatName string, cfg *common.Config, _ int) (outputs.Outputer, error) {
 	output := &s3Output{
 		beatName:    beatName,
 		s3Svc:       svc,
-		consumerMap: make(map[string]*consumer),
+		consumerMap: make(map[string]ConsumerAPI),
 		consumerWg:  &sync.WaitGroup{},
 	}
 
@@ -84,7 +89,7 @@ func (out *s3Output) Close() error {
 	debug("Close called on s3 outputter, shutting down")
 	out.ticker.Stop()
 	for _, consumer := range out.consumerMap {
-		close(consumer.lineChan)
+		consumer.Shutdown()
 	}
 	out.consumerWg.Wait()
 	return nil
@@ -97,7 +102,7 @@ func (out *s3Output) startTicker() {
 		for tick := range out.ticker.C {
 			debug("Recieved tick in s3 output, signalling consumers")
 			for _, consumer := range out.consumerMap {
-				consumer.tickChan <- tick
+				consumer.Tick(tick)
 			}
 		}
 	}()
@@ -137,11 +142,11 @@ func (out *s3Output) PublishEvent(
 		out.consumerWg.Add(1)
 		go func() {
 			defer out.consumerWg.Done()
-			consumer.run()
+			consumer.Run()
 		}()
 	}
 
-	consumer.lineChan <- message
+	consumer.AppendLine(message)
 
 	return err
 }

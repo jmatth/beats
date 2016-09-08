@@ -12,18 +12,37 @@ import (
 	"github.com/elastic/beats/libbeat/logp"
 )
 
+type ConsumerAPI interface {
+	Run()
+	AppendLine(string)
+	Tick(time.Time)
+	Shutdown()
+}
+
 type consumer struct {
 	lineChan     chan string
 	tickChan     chan time.Time
 	appType      string
 	file         *os.File
-	s3Svc        *s3.S3
+	s3Svc        S3API
 	bucket       string
 	prefix       string
 	linesWritten int
 }
 
-func (c *consumer) run() {
+func (c *consumer) AppendLine(line string) {
+	c.lineChan <- line
+}
+
+func (c *consumer) Shutdown() {
+	close(c.lineChan)
+}
+
+func (c *consumer) Tick(tick time.Time) {
+	c.tickChan <- tick
+}
+
+func (c *consumer) Run() {
 	debug("Starting s3 consumer for app: %v", c.appType)
 	for {
 		select {
@@ -93,10 +112,11 @@ func (c *consumer) upload(tick time.Time) {
 
 }
 
-func newConsumer(tempDir string, appType string, s3Svc *s3.S3, bucket string, prefix string) (*consumer, error) {
-	file, err := os.Create(path.Join(tempDir, appType))
+func newConsumer(tempDir string, appType string, s3Svc S3API, bucket string, prefix string) (*consumer, error) {
+	filePath := path.Join(tempDir, appType)
+	file, err := os.Create(filePath)
 	if err != nil {
-		logp.Err("Failed to create temporary file: %v", file.Name())
+		logp.Err("Failed to create temporary file: %v", filePath)
 		return nil, err
 	}
 	logp.Info("Created new temporary file: %v", file.Name())
