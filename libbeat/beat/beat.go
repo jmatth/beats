@@ -185,7 +185,7 @@ func (b *Beat) launch(bt Creator) error {
 
 	// TODO: some beats race on shutdown with publisher.Stop -> do not call Stop yet,
 	//       but refine publisher to disconnect clients on stop automatically
-	// defer publisher.Stop()
+	defer publisher.Stop()
 
 	b.Publisher = publisher
 	beater, err := bt(b, sub)
