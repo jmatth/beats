@@ -57,10 +57,15 @@ imports:
 # This is called by the beats packer before building starts
 .PHONY: before-build
 before-build:
+	# disable the system/load metricset on windows
+	sed -i.bk 's/- load/#- load/' $(PREFIX)/metricbeat-win.yml
+	rm $(PREFIX)/metricbeat-win.yml.bk
+	sed -i.bk 's/- load/#- load/' $(PREFIX)/metricbeat-win.full.yml
+	rm $(PREFIX)/metricbeat-win.full.yml.bk
 
 # Runs all collection steps and updates afterwards
 .PHONY: collect
-collect: fields collect-docs configs update imports kibana
+collect: fields collect-docs configs kibana imports update
 
 # Creates a new metricset. Requires the params MODULE and METRICSET
 .PHONY: create-metricset
@@ -72,3 +77,4 @@ create-metricset:
 .PHONY: generate-json
 generate-json: build-image
 	 ${DOCKER_COMPOSE} run beat go test -tags=integration github.com/elastic/beats/metricbeat/module/... -data
+
