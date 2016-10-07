@@ -1,11 +1,14 @@
 package s3out
 
 import (
+	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/elastic/beats/libbeat/logp"
@@ -52,12 +55,12 @@ func (c *consumer) run() {
 	for {
 		select {
 		case <-c.ticker.C:
-			c.upload(true)
+			c.upload(false)
 		case line, ok := <-c.lineChan:
 			if ok {
 				c.append(line)
 			} else {
-				c.upload(false)
+				c.upload(true)
 				c.uploader.shutdown()
 				logp.Info("Waiting for s3 uploads for %v to complete...", c.appType)
 				<-c.uploadThreadChan
@@ -75,7 +78,7 @@ func (c *consumer) append(line string) {
 
 	if timestamp != nil {
 		if timestamp.Before(c.chunkStartTime) || timestamp.After(c.chunkStartTime.Add(c.chunkDuration)) {
-			c.upload(true)
+			c.upload(false)
 			c.chunkStartTime = *timestamp
 		}
 	}
@@ -83,7 +86,7 @@ func (c *consumer) append(line string) {
 	fmt.Fprintln(c.file, line)
 
 	if timestamp != nil {
-		c.setModTime(c.file.Name(), *timestamp)
+		setModTime(c.file.Name(), *timestamp)
 	}
 }
 
@@ -105,14 +108,14 @@ func (c *consumer) getLineTimestamp(line string) (*time.Time, error) {
 	return &timestamp, nil
 }
 
-func (c *consumer) setModTime(filePath string, timestamp time.Time) {
+func setModTime(filePath string, timestamp time.Time) {
 	err := os.Chtimes(filePath, timestamp, timestamp)
 	if err != nil {
 		logp.Err("Error setting timestamp on %v: %v", filePath, err)
 	}
 }
 
-func (c *consumer) upload(createNewFile bool) {
+func (c *consumer) upload(shuttingDown bool) {
 
 	fInfo, err := c.file.Stat()
 	if err != nil {
@@ -122,6 +125,9 @@ func (c *consumer) upload(createNewFile bool) {
 
 	if fInfo.Size() < 1 {
 		logp.Info("Chunk %v is empty, not uploading", c.file.Name())
+		if shuttingDown {
+			removeFile(c.file)
+		}
 		return
 	}
 
@@ -131,13 +137,53 @@ func (c *consumer) upload(createNewFile bool) {
 		return
 	}
 
-	debug("Sending %v to uploader goroutine", c.file.Name())
-	c.uploader.fileChan <- c.file
+	logp.Info("Compressing %v", c.file.Name())
+	compressedFile, err := compressFile(c.file)
+	if err != nil {
+		logp.Err(err.Error())
+		return
+	}
 
-	if createNewFile {
+	debug("Sending %v to uploader goroutine", compressedFile.Name())
+	c.uploader.fileChan <- compressedFile
+
+	if !shuttingDown {
 		c.createTempFile()
 	}
 
+}
+
+func compressFile(file *os.File) (gzFile *os.File, err error) {
+	fInfo, err := file.Stat()
+	_, err = file.Seek(0, 0)
+	if err != nil {
+		return
+	}
+
+	gzFile, err = os.Create(fInfo.Name() + ".gz")
+	if err != nil {
+		return
+	}
+
+	gzWriter := gzip.NewWriter(gzFile)
+	if err != nil {
+		return
+	}
+
+	_, err = io.Copy(gzWriter, file)
+	if err != nil {
+		return
+	}
+
+	err = gzWriter.Close()
+	if err != nil {
+		removeFile(gzFile)
+		return
+	}
+
+	setModTime(gzFile.Name(), fInfo.ModTime())
+	removeFile(file)
+	return
 }
 
 func (c *consumer) runUploader() {
@@ -160,7 +206,7 @@ func (c *consumer) init() error {
 }
 
 func (c *consumer) createTempFile() error {
-	tempFilePath := fmt.Sprintf("%s_%d", c.baseFilePath, time.Now().UTC().UnixNano())
+	tempFilePath := fmt.Sprintf("%s_%d.log", c.baseFilePath, time.Now().UTC().UnixNano())
 	file, err := os.Create(tempFilePath)
 	if err != nil {
 		logp.Err("Failed to create temporary file: %v", tempFilePath)
@@ -172,11 +218,32 @@ func (c *consumer) createTempFile() error {
 }
 
 func (c *consumer) handleLeftoverChunks() error {
-	chunkPaths, err := filepath.Glob(fmt.Sprintf("%s_*", c.baseFilePath))
+	gzChunkPaths, err := filepath.Glob(fmt.Sprintf("%s_*.log.gz", c.baseFilePath))
 	if err != nil {
 		return err
 	}
+	// If a gzipped file exists along with its uncompressed version, it's possible
+	// the compression didn't finish before the crash. We'll just play it safe and
+	// recompress it.
+	for _, filePath := range gzChunkPaths {
+		if _, err := os.Stat(strings.Replace(filePath, ".gz", "", -1)); err != nil {
+			err = os.Remove(filePath)
+			if err != nil {
+				logp.Err("Encountered error while removing leftover compressed chunk %v: %v", filePath, err.Error())
+			}
+		} else {
+			file, err := os.Open(filePath)
+			if err != nil {
+				return err
+			}
+			c.uploader.fileChan <- file
+		}
+	}
 
+	chunkPaths, err := filepath.Glob(fmt.Sprintf("%s_*.log", c.baseFilePath))
+	if err != nil {
+		return err
+	}
 	for _, filePath := range chunkPaths {
 		file, err := os.Open(filePath)
 		if err != nil {
@@ -191,13 +258,21 @@ func (c *consumer) handleLeftoverChunks() error {
 
 		if fInfo.Size() < 1 {
 			// It's empty, just delete it and move on
+			debug("Found empty leftover chunk %v, deleting it", filePath)
+			file.Close()
 			os.Remove(filePath)
 			continue
 		}
 
+		logp.Info("Compressing %v", file.Name())
+		gzFile, err := compressFile(file)
+		if err != nil {
+			return err
+		}
+
 		logp.Info("Found non-empty leftover chunk for %v, uploading it", c.appType)
 		// Put it directly in the upload queue, from here on it behaves like a chunk that failed to upload during the current exucution of the program
-		c.uploader.fileChan <- file
+		c.uploader.fileChan <- gzFile
 	}
 
 	return nil
@@ -207,7 +282,7 @@ func removeFile(file *os.File) {
 	debug("Removing file %v", file.Name())
 	err := file.Close()
 	if err != nil {
-		logp.Err("Error closing file: %v", err)
+		logp.Err("Error closing file %v: %v", file.Name(), err)
 	}
 	err = os.Remove(file.Name())
 	if err != nil {

@@ -70,7 +70,13 @@ func (s *s3uploader) tryUpload(file *os.File) error {
 
 		err := s.s3Put(file)
 		if err == nil {
-			removeFile(file)
+			// Don't call removeFile, it will spam error messages because
+			// s3 already closed the file
+			debug("Removing file %v", file.Name())
+			err = os.Remove(file.Name())
+			if err != nil {
+				logp.Err("Error removing file %v: %v", file.Name(), err)
+			}
 			break
 		}
 

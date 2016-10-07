@@ -176,6 +176,7 @@ func (out *s3Output) getConsumer(options *consumerOptions) (consumer consumerAPI
 		return
 	}
 
+	logp.Info("Creating new s3 consumer for %v", options.AppType)
 	consumer, err = newConsumer(out.config, options, out.s3Svc)
 	if err != nil {
 		logp.Err("Error creating consumer for appType %v: %v", options.AppType, err)
